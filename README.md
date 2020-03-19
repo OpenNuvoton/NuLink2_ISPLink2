@@ -9,7 +9,6 @@ NuLink2_ISPLink2 is an example code, that can do ISP function in NuLink2-Pro off
 1. Connect bus between NuLink2-Pro board and target chip (e.g. UART CON6 PIN1 and PIN2, to TARGET CHIP UART. share the ground
 1. press SW1 of NuLink2-Pro, then press RESET button of target board, and it will connect and programming
 1. print log from CON4 UART, the progress will show
- 
 
 ### For detail, please check "NuLink2-Pro OFFLINE ISP.PPT"
 
