@@ -7,6 +7,7 @@
  * @copyright (C) 2016 Nuvoton Technology Corp. All rights reserved.
  ******************************************************************************/
 #include <stdio.h>
+#include <string.h>
 #include "NuMicro.h"
 #include "massstorage.h"
 #include "isp_bridge.h"
@@ -14,45 +15,35 @@
 #include "ISP_DRIVER.H"
 #include "hal_api.h"
 #include "Voltage.h"
-typedef enum
-{
-    UART_BUS,
-    RS485_BUS,
-    CAN_BUS,
-    SPI_BUS,
-    I2C_BUS,
-    UART_1_WIRE_BUS,
-    RS485_Address_BUS,
-} DEVICE_ENUM;
-io_handle_t  DEV_handle = NULL;
-extern struct sISP_COMMAND ISP_COMMAND;
-uint32_t fwversion, flash_boot;
-extern volatile unsigned int AP_file_totallen;
-uint32_t devid, config[2];
-extern void SpiInit(void);
+#include "ff.h"
 
+#include "lauxlib.h"
+#include "lua.h"
+#include "lauxlib.h"
+#include "lualib.h"
+#include "luaconf.h"
+#include "usbh_lib.h"
+#include "usbh_hid.h"
+
+//timer 0 FOR USB HOST
+//timer 1 for usb host
+extern unsigned char load_lua_script(void);
+extern int luaopen_mylib(lua_State *L);
+extern char LUA_SCRIPT_GLOBAL[4096];
+extern void put_rc(FRESULT rc);
+extern void SpiInit(void);
+extern void enable_USB_HOST_tick(int ticks_per_second);
 #define ISP_LED_ON PC6=0
 #define ISP_LED_OFF PC6=1
 #define BUSY PB9
 #define PASS PB8
+unsigned char storage = 0;
+unsigned char button_start = 0;
+FATFS  _FatfsVolSDHC1;
+FATFS  _FatfsVolSPI_FLASH;
+FATFS  _FatfsVolUSBDISK;
 
-#if 1
-void check_error(char d, char *l, ErrNo ret_in)
-{
-    if (ret_in)
-    {
-        printf("%d\n\r", d);
-        printf("%s\n\r", l);
-        printf("this is error code %d\n\r", ret_in);
-        //while(1);
-    }
-}
-#else
-void check_error(char d, char *l, ErrNo ret_in)
-{
 
-}
-#endif
 /*--------------------------------------------------------------------------*/
 void SYS_Init(void)
 {
@@ -80,7 +71,7 @@ void SYS_Init(void)
     CLK->PCLKDIV = CLK_PCLKDIV_PCLK0DIV2 | CLK_PCLKDIV_PCLK1DIV2;
 
     SYS->USBPHY &= ~SYS_USBPHY_HSUSBROLE_Msk;    /* select HSUSBD */
-    /* Enable USB PHY */
+    /* Enable USB HIGH HOST PHY */
     SYS->USBPHY = (SYS->USBPHY & ~(SYS_USBPHY_HSUSBROLE_Msk | SYS_USBPHY_HSUSBACT_Msk)) | SYS_USBPHY_HSUSBEN_Msk;
 
     for (i = 0; i < 0x1000; i++);  // delay > 10 us
@@ -97,129 +88,66 @@ void SYS_Init(void)
     CLK_EnableModuleClock(UART0_MODULE);
 
     /* Set GPB multi-function pins for UART0 RXD and TXD */
-    //SYS->GPB_MFPH &= ~(SYS_GPB_MFPH_PB12MFP_Msk | SYS_GPB_MFPH_PB13MFP_Msk);
-    //SYS->GPB_MFPH |= (SYS_GPB_MFPH_PB12MFP_UART0_RXD | SYS_GPB_MFPH_PB13MFP_UART0_TXD);
     SYS->GPA_MFPL &= ~(SYS_GPA_MFPL_PA0MFP_Msk | SYS_GPA_MFPL_PA1MFP_Msk);
     SYS->GPA_MFPL |= (SYS_GPA_MFPL_PA0MFP_UART0_RXD | SYS_GPA_MFPL_PA1MFP_UART0_TXD);
 
+
+    /* select multi-function pin */
+    SYS->GPG_MFPH &= ~(SYS_GPG_MFPH_PG13MFP_Msk     | SYS_GPG_MFPH_PG14MFP_Msk     | SYS_GPG_MFPH_PG11MFP_Msk      | SYS_GPG_MFPH_PG12MFP_Msk);
+    SYS->GPG_MFPH |= (SYS_GPG_MFPH_PG13MFP_SD1_CMD | SYS_GPG_MFPH_PG14MFP_SD1_CLK | SYS_GPG_MFPH_PG11MFP_SD1_DAT1 | SYS_GPG_MFPH_PG12MFP_SD1_DAT0);
+
+    SYS->GPG_MFPH &= ~(SYS_GPG_MFPH_PG9MFP_Msk      | SYS_GPG_MFPH_PG10MFP_Msk);
+    SYS->GPG_MFPH |= (SYS_GPG_MFPH_PG9MFP_SD1_DAT3 | SYS_GPG_MFPH_PG10MFP_SD1_DAT2);
+
+    SYS->GPD_MFPH &= ~(SYS_GPG_MFPH_PG15MFP_Msk);
+    SYS->GPD_MFPH |= (SYS_GPG_MFPH_PG15MFP_SD1_nCD);
+    CLK_SetModuleClock(SDH1_MODULE, CLK_CLKSEL0_SDH1SEL_PLL, CLK_CLKDIV0_SDH0(10));
+
+    CLK_EnableModuleClock(SDH1_MODULE);
+    CLK_EnableModuleClock(UART0_MODULE);
+    CLK_EnableModuleClock(TMR0_MODULE);
+
+    CLK_SetModuleClock(TMR0_MODULE, CLK_CLKSEL1_TMR0SEL_HXT, 0);
+    /* User can use SystemCoreClockUpdate() to calculate PllClock, SystemCoreClock and CycylesPerUs automatically. */
+
+
+    CLK_EnableModuleClock(USBH_MODULE);
+
+    /* USB Host desired input clock is 48 MHz. Set as PLL divided by 4 (192/4 = 48) */
+    CLK->CLKDIV0 = (CLK->CLKDIV0 & ~CLK_CLKDIV0_USBDIV_Msk) | CLK_CLKDIV0_USB(4);
+
+    /* Enable USBD and OTG clock */
+    CLK->APBCLK0 |= CLK_APBCLK0_USBDCKEN_Msk | CLK_APBCLK0_OTGCKEN_Msk;
+    /* Set OTG as USB Host role */
+    SYS->USBPHY = (SYS->USBPHY & ~(SYS_USBPHY_USBROLE_Msk)) | SYS_USBPHY_USBEN_Msk | SYS_USBPHY_SBO_Msk | (0x1 << SYS_USBPHY_USBROLE_Pos);
+    SYS->GPB_MFPL = (SYS->GPB_MFPL & ~SYS_GPB_MFPL_PB6MFP_Msk) | SYS_GPB_MFPL_PB6MFP_USB_VBUS_EN;
+
+    /* USB_VBUS_ST (USB 1.1 over-current detect pin) multi-function pin - PC.14   */
+    SYS->GPB_MFPL = (SYS->GPB_MFPL & ~SYS_GPB_MFPL_PB7MFP_Msk) | SYS_GPB_MFPL_PB7MFP_USB_VBUS_ST;
+    SYS->GPA_MFPH &= ~(SYS_GPA_MFPH_PA12MFP_Msk | SYS_GPA_MFPH_PA13MFP_Msk |
+                       SYS_GPA_MFPH_PA14MFP_Msk | SYS_GPA_MFPH_PA15MFP_Msk);
+    SYS->GPA_MFPH |= SYS_GPA_MFPH_PA12MFP_USB_VBUS | SYS_GPA_MFPH_PA13MFP_USB_D_N |
+                     SYS_GPA_MFPH_PA14MFP_USB_D_P | SYS_GPA_MFPH_PA15MFP_USB_OTG_ID;
+
+    SystemCoreClockUpdate();
 }
-extern unsigned int Read_ARPOM_INFORMATION(void);
-extern void Read_DATAFLASH_INFORMATION(void);
-extern void Read_SN_INFORMATION(void);
-extern void Read_INTERFACE(void);
-extern void Read_Define_File(void);
-extern void Read_CONFIG_SDCARD(void);
-extern unsigned int MOUNT_FILE_SYSTEM(void) ;
-extern void UNMOUNT_FILE_SYSTEM(void);
-extern volatile DEVICE_ENUM DEVICE_TYPE;
-extern volatile unsigned int AUTO_DETECT_VALUE;
-unsigned int programming_count;
 
-
-void ISP_FLOW(void)
+unsigned char load_lua_script(void)
 {
-    ErrNo ret;
-    BUSY = 0;
+    uint32 cnt = 0;
+    FIL file1;
 
-    if (MOUNT_FILE_SYSTEM() == 0)
+    if (f_open(&file1, (const char *)"0:\\isp.lua", FA_OPEN_EXISTING | FA_READ))
     {
-        printf("fatfs ok\n\r");
-    }
-    else
-        return ;
-
-    //read aprom information
-    if (Read_ARPOM_INFORMATION() == 0)
-    {
-
-        //read dataflash information
-        Read_DATAFLASH_INFORMATION();
-
-        //read serinal number
-        Read_SN_INFORMATION();
-
-        //read interface
-        Read_INTERFACE();
-
-        Read_CONFIG_SDCARD();
-
-        if (DEVICE_TYPE == I2C_BUS)
-            ret = io_open(I2C_NAME_STRING, &DEV_handle);
-
-        if (DEVICE_TYPE == RS485_BUS)
-            ret = io_open(RS485_NAME_STRING, &DEV_handle);
-
-        if (DEVICE_TYPE == SPI_BUS)
-            ret = io_open(SPI_NAME_STRING, &DEV_handle);
-
-        if (DEVICE_TYPE == UART_BUS)
-            ret = io_open(UART_NAME_STRING, &DEV_handle);
-
-        if (DEVICE_TYPE == CAN_BUS)
-            ret = io_open(CAN_NAME_STRING, &DEV_handle);
-
-
-
-        init_ISP_command();
-
-        if (AUTO_DETECT_VALUE == 1)
-        {
-            Auto_Detect_Connect(&ISP_COMMAND);
-        }
-        if (DEVICE_TYPE == RS485_BUS)
-            AUTO_DETECT_VALUE = 1;
-
-
-        if (DEVICE_TYPE == UART_BUS)
-            AUTO_DETECT_VALUE = 1;
-        ret = SyncPackno(&ISP_COMMAND);
-        check_error(__LINE__, __FILE__, ret);
-        if (DEVICE_TYPE == UART_BUS)
-            AUTO_DETECT_VALUE = 0;
-				if (DEVICE_TYPE == RS485_BUS)
-            AUTO_DETECT_VALUE = 0;
-        if (ret!=0)
-            goto EXIT;
-
-        ret = FWVersion(&ISP_COMMAND, &fwversion);
-        check_error(__LINE__, __FILE__, ret);
-			
-        printf("fw version:0x%x\n\r", fwversion);
-        ret = GetDeviceID(&ISP_COMMAND, &devid);
-        check_error(__LINE__, __FILE__, ret);
-
-        printf("device id:0x%x\n\r", devid);
-        ret = GetConfig(&ISP_COMMAND, config);
-        check_error(__LINE__, __FILE__, ret);
-        printf("config0: 0x%x\n\r", config[0]);
-        printf("config1: 0x%x\n\r", config[1]);
-        ret = GetFlashMode(&ISP_COMMAND, &flash_boot);
-        check_error(__LINE__, __FILE__, ret);
-        printf("device id:0x%x\n\r", devid);
-
-        if (flash_boot != LDROM_MODE)
-        {
-            printf("boot in APROM\n\r");
-        }
-        else
-        {
-            printf("boot in LDROM\n\r");
-        }
-
-        if (AP_file_totallen != 0)
-        {
-            ret = Updated_Target_Flash(&ISP_COMMAND, 0, AP_file_totallen);
-            check_error(__LINE__, __FILE__, ret);
-            programming_count++;
-            printf("%d\n\r", programming_count);
-        }
-
+        return 1;//false
     }
 
-EXIT:
-    UNMOUNT_FILE_SYSTEM();
-
+    f_read(&file1, LUA_SCRIPT_GLOBAL, 4096, &cnt);
+    printf("lua file size %d\n\r", cnt);
+    f_close(&file1);
+    return 0;
 }
+
 
 void GPC_IRQHandler(void)
 {
@@ -227,12 +155,19 @@ void GPC_IRQHandler(void)
     if (GPIO_GET_INT_FLAG(PC, BIT7))
     {
         GPIO_CLR_INT_FLAG(PC, BIT7);
+        button_start = 1;
     }
 }
 
+
 int32_t main(void)
 {
+    lua_State *L = NULL;
+    FRESULT     res;
+
+
     SYS_Init();
+
     Voltage_Init();
     Voltage_SupplyTargetPower(1, 3300);
 
@@ -247,8 +182,7 @@ int32_t main(void)
     MSC_Init();
     GPIO_SET_DEBOUNCE_TIME(GPIO_DBCTL_DBCLKSRC_LIRC, GPIO_DBCTL_DBCLKSEL_1024);
     GPIO_ENABLE_DEBOUNCE(PC, BIT7);
-    /* Enable USBD interrupt */
-    NVIC_EnableIRQ(USBD20_IRQn);
+
     GPIO_SetMode(PC, BIT7, GPIO_MODE_INPUT);
     GPIO_EnableInt(PC, 7, GPIO_INT_FALLING);
     NVIC_EnableIRQ(GPC_IRQn);
@@ -259,16 +193,145 @@ int32_t main(void)
     GPIO_SetMode(PB, BIT8, GPIO_MODE_OUTPUT);
     ISP_LED_ON;
 
+    storage = 0x1;
+    printf("inital internal SPI FLASH\n\r");
+    res = f_mount(&_FatfsVolSPI_FLASH, "0:", 1);
+
+    if (res)
+    {
+        //  put_rc(res);
+        storage &= 0xfe;
+    }
+
+    storage |= 0x2;
+    GPIO_SetMode(PD, BIT13, GPIO_MODE_OUTPUT);
+    PD13 = 0; //SDCARD POWER
+    printf("inital SDCARD\n\r");
+    SDH_Open_Disk(SDH1, CardDetect_From_GPIO);
+
+    if (SDH_Probe(SDH1))
+    {
+        //   printf("SD initial fail!!\n");
+        storage &= 0xfd;
+    }
+    else
+    {
+        res = f_mount(&_FatfsVolSDHC1, "1:", 1);
+
+        if (res)
+        {
+            //   put_rc(res);
+            storage &= 0xfd;
+        }
+    }
+
+#if 0
+    enable_USB_HOST_tick(100);
+    usbh_core_init();
+    usbh_hid_init();
+    usbh_memory_used();
+
+    memset(g_hid_list, 0, sizeof(g_hid_list));
+
+    while (1)
+    {
+        if (usbh_pooling_hubs())             /* USB Host port detect polling and management */
+        {
+            printf("\n Has hub events.\n");
+            hdev = usbh_hid_get_device_list();
+
+            if (hdev != NULL)
+            {
+                init_hid_device(hdev);
+                update_hid_device_list(hdev_list);
+                usbh_memory_used();
+                break;
+            }
+
+
+        }
+    }
+
+#endif
+#if USBHOST_DISK
+    unsigned int usbhost_false_count;
+    storage |= 0x4;
+    printf("inital USBDISK\n\r");
+    enable_USB_HOST_tick(100);
+    usbh_core_init();
+    usbh_umas_init();
+    usbhost_false_count = 0;
+
+    while (1)
+    {
+        usbh_pooling_hubs();
+        res = f_mount(&_FatfsVolUSBDISK, "2:", 1);
+
+        if (res)
+        {
+            put_rc(res);
+            usbhost_false_count++;
+
+            if (usbhost_false_count > 1000)
+            {
+                storage &= 0xfb;
+                break;
+            }
+        }
+        else
+        {
+            break;
+        }
+    }
+
+#endif
+
+    if ((storage & 0x01) == 0x01)
+    {
+        printf("the SPI flash ready\n\r");
+    }
+
+    if ((storage & 0x02) == 0x02)
+    {
+        printf("the SDCARD ready\n\r");
+    }
+
+    if ((storage & 0x04) == 0x04)
+    {
+        printf("the USB DISK ready\n\r");
+    }
+
+    /* Enable USBD interrupt */
+    NVIC_EnableIRQ(USBD20_IRQn);
+
     while (1)
     {
         //  SYS_UnlockReg();
         CLK_Idle();
 
-        if (PC7 == 0)
+        if (button_start == 1)
         {
+            while (PC7 == 0); //wait for button release
+
+            button_start = 0; //clear button
             NVIC_DisableIRQ(USBD20_IRQn);
-            ISP_FLOW();
+            NVIC_DisableIRQ(GPC_IRQn);
+
+            if (load_lua_script() == 0)
+            {
+                L = luaL_newstate();
+                luaopen_base(L);
+                luaopen_mylib(L);
+                luaL_openlibs(L);
+                printf("run lua\n\r");
+                luaL_dostring(L, LUA_SCRIPT_GLOBAL);
+                //luaL_dostring(L, Buff);
+                lua_close(L);
+                printf("lua end\n\r");
+            }
+
             NVIC_EnableIRQ(USBD20_IRQn);
+            NVIC_EnableIRQ(GPC_IRQn);
         }
 
         if (HSUSBD_IS_ATTACHED())
@@ -285,12 +348,29 @@ int32_t main(void)
         if (g_hsusbd_Configured)
             MSC_ProcessCmd();
 
-        if (PC7 == 0)
+        if (button_start == 1)
         {
-            NVIC_DisableIRQ(USBD20_IRQn);
-            ISP_FLOW();
-            NVIC_EnableIRQ(USBD20_IRQn);
+            while (PC7 == 0); //wait for button release
 
+            button_start = 0; //clear button
+            NVIC_DisableIRQ(USBD20_IRQn);
+            NVIC_DisableIRQ(GPC_IRQn);
+
+            if (load_lua_script() == 0)
+            {
+                L = luaL_newstate();
+                luaopen_base(L);
+                luaopen_mylib(L);
+                luaL_openlibs(L);
+                printf("run lua\n\r");
+                luaL_dostring(L, LUA_SCRIPT_GLOBAL);
+                //luaL_dostring(L, Buff);
+                lua_close(L);
+                printf("lua end\n\r");
+            }
+
+            NVIC_EnableIRQ(USBD20_IRQn);
+            NVIC_EnableIRQ(GPC_IRQn);
         }
     }
 }

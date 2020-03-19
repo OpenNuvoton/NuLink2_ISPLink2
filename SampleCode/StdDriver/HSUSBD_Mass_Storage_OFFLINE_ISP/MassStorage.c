@@ -29,8 +29,8 @@ uint32_t g_u32MSCMaxLun = 0;
 uint32_t g_u32LbaAddress;
 uint32_t g_u32MassBase;
 uint32_t g_u32StorageBase;
-uint32_t MassBlock[MASS_BUFFER_SIZE / 4];
-uint32_t Storage_Block[STORAGE_BUFFER_SIZE / 4];
+uint32_t volatile MassBlock[MASS_BUFFER_SIZE / 4];
+uint32_t volatile Storage_Block[STORAGE_BUFFER_SIZE / 4];
 
 uint32_t g_u32EpMaxPacketSize;
 uint32_t g_u32CbwSize = 0;
